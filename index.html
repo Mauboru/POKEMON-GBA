@@ -6,6 +6,7 @@
     <title>Pokémon GBA RPG - Canvas Immersive</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+    <!-- Firebase SDKs -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
@@ -53,6 +54,7 @@
             currentScreen: 'mainMenu',
             battle: null, // { type: 'wild' | 'npc' | 'pvp', opponent: {...}, turn: 1, lastMessage: '', log: [] }
             pvpRoomId: null,
+            exploreLog: ['Bem-vindo ao Pokémon GBA RPG!'], // NOVO: Log de exploração para o menu
         };
 
         const POKEAPI_BASE = 'https://pokeapi.co/api/v2/pokemon/';
@@ -67,6 +69,7 @@
                 delete stateToSave.battle;
                 delete stateToSave.pvpRoomId;
                 localStorage.setItem('pokemonGameProfile', JSON.stringify(stateToSave.profile));
+                localStorage.setItem('pokemonGameExploreLog', JSON.stringify(stateToSave.exploreLog));
                 console.log('Jogo Salvo com Sucesso!');
             } catch (error) {
                 console.error("Erro ao salvar jogo:", error);
@@ -76,8 +79,13 @@
         function loadGame() {
             try {
                 const savedProfile = localStorage.getItem('pokemonGameProfile');
+                const savedExploreLog = localStorage.getItem('pokemonGameExploreLog');
+                
                 if (savedProfile) {
                     window.gameState.profile = JSON.parse(savedProfile);
+                    if (savedExploreLog) {
+                         window.gameState.exploreLog = JSON.parse(savedExploreLog);
+                    }
                     console.log('Jogo Carregado com Sucesso!');
                     if (window.gameState.profile.pokemon.length === 0) {
                         showScreen('initialMenu');
@@ -168,39 +176,119 @@
 
         // --- Funções de Captura ---
         function calculateCatchRate(pokemonHp, maxHp, ballCatchRate) {
-            // Fórmula de captura simplificada: quanto menor o HP, maior a chance.
-            const hpRatio = pokemonHp / maxHp; // 1.0 (cheio) a ~0 (quase vazio)
-            const baseChance = POKEBALL_BASE_CATCH_RATE * ballCatchRate;
+            const wildPokemon = window.gameState.battle.opponent;
+
+            // Fator de HP: 1.0 (cheio) a 0.0 (vazio). Quanto menor, melhor.
+            const hpRatio = pokemonHp / maxHp; 
+
+            // Fator de Nível: Quanto menor o nível, menor o divisor, maior a chance.
+            const levelFactor = wildPokemon.level; 
+
+            // Fórmula: (Pokébola Base Rate / (HP Ratio * Nível * 2)) * Multiplicador da Pokébola
+            let catchChance = POKEBALL_BASE_CATCH_RATE / (hpRatio * levelFactor * 2);
+
+            catchChance = catchChance * ballCatchRate;
             
-            // Chance de 1 a 100
-            const catchChance = Math.floor(baseChance / (hpRatio * 10 + 1));
-            return Math.min(95, Math.max(10, catchChance)); // Limita entre 10% e 95%
+            // Limita a chance entre 10% e 95% para não ser muito fácil ou impossível
+            return Math.min(95, Math.max(10, Math.floor(catchChance))); 
+        }
+        
+        /**
+         * Simula a animação de captura (3 balanços) e decide o resultado.
+         * @param {string} ballName 
+         * @param {number} ballCatchRate 
+         * @returns {Promise<boolean>} True se capturado, false caso contrário.
+         */
+        function animateCapture(ballName, ballCatchRate) {
+            return new Promise(resolve => {
+                const wildPokemon = window.gameState.battle.opponent;
+                const chance = calculateCatchRate(wildPokemon.currentHp, wildPokemon.maxHp, ballCatchRate);
+                const roll = Math.floor(Math.random() * 100) + 1;
+                const opponentSpriteElement = document.querySelector('.opponent-sprite');
+
+                // Esconde o Pokémon e mostra a Pokébola
+                if (opponentSpriteElement) {
+                    opponentSpriteElement.src = 'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/poke-ball.png';
+                    opponentSpriteElement.style.transform = 'scale(1.5)';
+                    opponentSpriteElement.classList.add('animate-spin-slow'); // CSS custom para balanço
+                }
+                
+                let shakes = 0;
+                let isCaptured = roll <= chance;
+
+                // Função de Balanço
+                const shakeInterval = setInterval(() => {
+                    shakes++;
+                    
+                    if (shakes <= 3) {
+                        addBattleLog(`... ${ballName} balança ${shakes} vez(es) ...`);
+                    }
+
+                    if (shakes === 3) {
+                        clearInterval(shakeInterval);
+                        
+                        if (opponentSpriteElement) {
+                            opponentSpriteElement.classList.remove('animate-spin-slow');
+                        }
+
+                        if (isCaptured) {
+                            // Sucesso!
+                            addBattleLog(`Sucesso! ${wildPokemon.name} foi capturado!`);
+                            
+                            setTimeout(() => {
+                                // Adiciona Pokémon e finaliza a batalha
+                                window.gameState.profile.pokemon.push(wildPokemon);
+                                saveGame();
+                                showScreen('mainMenu');
+                                resolve(true);
+                            }, 1000);
+                        } else {
+                            // Falha! Pokémon escapa
+                            addBattleLog(`Oh não! ${wildPokemon.name} escapou!`);
+                            
+                            // Mostra o sprite original do Pokémon novamente
+                            if (opponentSpriteElement) {
+                                opponentSpriteElement.src = wildPokemon.sprite;
+                                opponentSpriteElement.style.transform = 'scale(1.5)';
+                            }
+
+                            // Verifica se o Pokémon foge
+                            if (roll > 90) { // Chance de fuga
+                                addBattleLog(`${wildPokemon.name} fugiu da batalha!`);
+                                setTimeout(() => {
+                                    showScreen('mainMenu');
+                                    resolve(true); // Fuga encerra a batalha
+                                }, 1500);
+                            } else {
+                                // Retorna o controle para o turno de ataque do oponente
+                                resolve(false); 
+                            }
+                        }
+                    }
+                }, 1200); // Balança a cada 1.2 segundos
+            });
         }
 
-        function tryCapture(ballName, ballCatchRate) {
-            const wildPokemon = window.gameState.battle.opponent;
-            const chance = calculateCatchRate(wildPokemon.currentHp, wildPokemon.maxHp, ballCatchRate);
+        async function tryCapture(ballName, ballCatchRate) {
+            // Lógica de pré-captura (mensagem inicial)
+            addBattleLog(`Você joga a ${ballName}!`);
+
+            // Desativa botões durante a animação
+            setBattleMenu('disabled'); 
             
-            addBattleLog(`Você joga a ${ballName}! Chance de captura: ${chance}%`);
-            
-            const roll = Math.floor(Math.random() * 100) + 1;
-            
-            if (roll <= chance) {
-                addBattleLog(`Sucesso! ${wildPokemon.name} foi capturado!`);
-                
-                // Adiciona Pokémon e finaliza a batalha
-                window.gameState.profile.pokemon.push(wildPokemon);
-                saveGame();
-                showScreen('mainMenu');
-                return true;
-            } else if (roll > chance && roll < 90) {
-                addBattleLog(`Oh não! ${wildPokemon.name} escapou!`);
-            } else { // 90-100
-                addBattleLog(`${wildPokemon.name} fugiu da batalha!`);
-                showScreen('mainMenu');
-                return true;
+            // Inicia a animação e espera o resultado
+            const battleEnded = await animateCapture(ballName, ballCatchRate);
+
+            if (!battleEnded) {
+                // Se a batalha não terminou (captura falhou, mas Pokémon não fugiu), o oponente ataca
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                await playerTurn('opponent_attack');
             }
-            return false;
+
+            // Ativa os botões novamente se a batalha ainda estiver activa
+            if (window.gameState.battle) {
+                setBattleMenu('main');
+            }
         }
 
         // --- Funções de Navegação e Renderização ---
@@ -210,7 +298,7 @@
             app.innerHTML = '';
             
             switch (screenId) {
-                case 'initialMenu': // ATUALIZADO
+                case 'initialMenu': 
                     renderInitialMenu(app);
                     break;
                 case 'mainMenu':
@@ -226,10 +314,13 @@
                     renderBag(app, extraData);
                     break;
                 case 'explore':
-                    renderExplore(app);
+                    renderExplore(app); // Mantido o explore antigo, mas o novo está em renderMainMenu
                     break;
                 case 'battle':
                     renderBattleScreen(app);
+                    break;
+                case 'switchPokemon': 
+                    renderSwitchPokemon(app);
                     break;
                 case 'pvpSetup':
                     renderPvpSetup(app);
@@ -260,6 +351,16 @@
         // NOVO: Renderiza a tela de seleção de nome, gênero e inicial
         function renderInitialMenu(app) {
             const trainerName = window.gameState.profile.trainerName === 'NOVO TREINADOR' ? '' : window.gameState.profile.trainerName;
+
+            // Função auxiliar para determinar o sprite ID/Name
+            const getStarterSpriteKey = (name) => {
+                switch (name) {
+                    case 'bulbasaur': return '1';
+                    case 'charmander': return '4';
+                    case 'squirtle': return '7';
+                    default: return name; // Usa o nome para Pokémons customizados (Ex: 'pikachu')
+                }
+            };
             
             const content = `
                 <!-- Título como Imagem -->
@@ -307,7 +408,7 @@
                     <div class="flex flex-col sm:flex-row justify-around gap-4"> 
                         ${STARTERS.map(name => `
                             <div onclick="selectStarter('${name}')" class="flex flex-col items-center flex-1 cursor-pointer">
-                                <img src="https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${name === 'bulbasaur' ? '1' : name === 'charmander' ? '4' : '7'}.png" alt="${name}" 
+                                <img src="https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${getStarterSpriteKey(name)}.png" alt="${name}" 
                                     class="mx-auto w-20 h-20 sm:w-24 sm:h-24 transition-transform duration-200 hover:scale-125">
                                 <div class="text-xs gba-font text-gray-800 mt-2 text-center">${formatName(name)}</div>
                             </div>
@@ -346,38 +447,89 @@
             }
         }
 
+        // --- NOVO: Renderiza o Menu Principal com layout 2x1 ---
         function renderMainMenu(app) {
             const profile = window.gameState.profile;
-            const menuHtml = `
-                <div class="text-xl font-bold text-center mb-4 text-gray-800 gba-font">MENU PRINCIPAL</div>
-                <div class="text-sm text-center mb-4 gba-font">Treinador: ${profile.trainerName} | Poké: ${profile.pokemon.length}</div>
-                <div class="space-y-2">
-                    <button onclick="showScreen('profile')" class="gba-button bg-blue-500 hover:bg-blue-600">Perfil</button>
-                    <button onclick="showScreen('pokemonList')" class="gba-button bg-red-500 hover:bg-red-600">Pokémons (${profile.pokemon.length})</button>
-                    <button onclick="showScreen('bag')" class="gba-button bg-yellow-500 hover:bg-yellow-600">Mochila (${profile.items.reduce((sum, item) => sum + item.quantity, 0)})</button>
-                    <button onclick="showScreen('explore')" class="gba-button bg-green-500 hover:bg-green-600">Explorar</button>
-                    <button onclick="showScreen('pvpSetup')" class="gba-button bg-purple-500 hover:bg-purple-600">Batalhar (PvP)</button>
+            
+            // 1. Stats do Jogador (Lado Esquerdo)
+            const statsHtml = `
+                <div class="p-2 bg-white border-2 border-gray-800 rounded-lg shadow-inner mb-4 sm:mb-0 h-full">
+                    <div class="text-sm font-bold text-gray-800 gba-font border-b border-gray-300 pb-1 mb-2">TREINADOR</div>
+                    <div class="flex flex-col items-start space-y-1 text-xs gba-font">
+                        <p><strong>NOME:</strong> ${profile.trainerName}</p>
+                        <p><strong>GÊNERO:</strong> ${profile.trainerGender === 'MALE' ? 'M' : 'F'}</p>
+                        <p><strong>DINHEIRO:</strong> P$${profile.money}</p>
+                        <p><strong>POKÉS:</strong> ${profile.pokemon.length} / 6</p>
+                        <button onclick="showScreen('profile')" class="text-blue-600 hover:underline mt-2">VER PERFIL</button>
+                    </div>
                 </div>
-                <div class="mt-4 text-xs text-center text-gray-600 gba-font">Dinheiro: P$${profile.money}</div>
             `;
-            app.innerHTML = renderGbaCard(menuHtml);
-        }
 
-        // Função genérica para renderizar a lista de Pokémon
+            // 2. Menu de Ações (Lado Direito)
+            const menuHtml = `
+                <div class="space-y-2 p-2 h-full">
+                    <button onclick="showScreen('pokemonList')" class="gba-button bg-red-500 hover:bg-red-600">POKÉMONS</button>
+                    <button onclick="showScreen('bag')" class="gba-button bg-yellow-500 hover:bg-yellow-600">MOCHILA</button>
+                    <button onclick="showScreen('pvpSetup')" class="gba-button bg-purple-500 hover:bg-purple-600">BATALHAR (PvP)</button>
+                    <button onclick="saveGame(); showModal('saveModal')" class="gba-button bg-gray-500 hover:bg-gray-600">SALVAR</button>
+                </div>
+            `;
+            
+            // 3. Exploração Rápida (Abaixo)
+            const exploreHtml = `
+                <div class="p-2 bg-white border-2 border-gray-800 rounded-lg shadow-inner">
+                    <div class="text-sm font-bold text-gray-800 gba-font border-b border-gray-300 pb-1 mb-2">EXPLORAÇÃO RÁPIDA</div>
+                    <div id="explore-result" class="h-10 text-xs gba-font mb-2 overflow-y-auto">
+                        ${window.gameState.exploreLog.slice(-1)[0]}
+                    </div>
+                    <button onclick="explore()" class="gba-button bg-green-500 hover:bg-green-600 w-full">ANDAR</button>
+                </div>
+            `;
+
+
+            const combinedHtml = `
+                <div class="text-xl font-bold text-center mb-4 text-gray-800 gba-font">MENU PRINCIPAL</div>
+                
+                <!-- Top Section: Stats (Left) & Menu (Right) -->
+                <div class="flex flex-col sm:flex-row gap-4 mb-4">
+                    <!-- Stats - 40% width on desktop, full width on mobile -->
+                    <div class="sm:w-2/5 w-full">
+                        ${statsHtml}
+                    </div>
+                    <!-- Menu - 60% width on desktop, full width on mobile -->
+                    <div class="sm:w-3/5 w-full">
+                        ${menuHtml}
+                    </div>
+                </div>
+
+                <!-- Bottom Section: Quick Explore -->
+                <div>
+                    ${exploreHtml}
+                </div>
+            `;
+            
+            app.innerHTML = renderGbaCard(combinedHtml);
+        }
+        
+        // Função genérica para renderizar a lista de Pokémon (FORA DE BATALHA)
         function renderPokemonList(app) {
             const healingItem = window.gameState.profile.items.find(i => i.healAmount && i.quantity > 0);
             
             const pokemonHtml = window.gameState.profile.pokemon.map((p, index) => {
+                const isFainted = p.currentHp <= 0;
                 const canHeal = healingItem && p.currentHp < p.maxHp;
+                
+                const statusText = isFainted ? 'DESMAIADO' : (p.currentHp < p.maxHp ? 'Ferido' : 'OK');
+
                 const healButton = canHeal 
                     ? `<button onclick="useItem('${healingItem.name}', ${index})" 
                         class="text-xs text-green-500 hover:underline gba-font mt-1 disabled:text-gray-400">
                         Curar (x${healingItem.quantity})
                     </button>`
-                    : `<span class="text-xs text-gray-500 gba-font mt-1">${p.currentHp < p.maxHp ? 'Sem Poção' : 'HP Máx.'}</span>`;
+                    : `<span class="text-xs text-gray-500 gba-font mt-1">${statusText}</span>`;
                 
                 return `
-                    <div class="flex items-center justify-between p-2 border-b border-gray-300">
+                    <div class="flex items-center justify-between p-2 border-b border-gray-300 ${isFainted ? 'opacity-50' : ''}">
                         <div class="flex items-center">
                             <img src="${p.sprite}" alt="${p.name}" class="w-10 h-10 mr-2">
                             <div>
@@ -408,7 +560,7 @@
                 let actionButton = '';
                 
                 if (item.healAmount && item.quantity > 0) {
-                    // Se for item de cura, o botão "Usar" leva para a lista de Pokémons para seleção.
+                    // O botão "Usar" agora sugere ir para a lista de Pokémons para cura.
                     actionButton = `<button onclick="showScreen('pokemonList')" class="text-xs text-green-600 hover:underline gba-font ml-2">Usar</button>`;
                 } else if (item.catchRate) {
                      // Não pode usar pokébola fora de batalha
@@ -460,10 +612,30 @@
             document.getElementById('saveModal').classList.add('hidden'); // Esconde modal se estiver visível
         }
 
+
         // --- Funções de Exploração e Eventos ---
+
+        function addExploreLog(message) {
+             window.gameState.exploreLog.push(message);
+             // Limita o log a 3 mensagens para caber na tela
+             if (window.gameState.exploreLog.length > 3) {
+                window.gameState.exploreLog.shift();
+             }
+             
+             // Se estiver no menu principal, atualiza o log visualmente
+             if (window.gameState.currentScreen === 'mainMenu') {
+                 const resultBox = document.getElementById('explore-result');
+                 if (resultBox) {
+                     resultBox.innerHTML = window.gameState.exploreLog.slice(-1)[0];
+                 }
+             }
+        }
+        
+        // Funções de Exploração agora chamam a batalha diretamente e usam o novo log
         async function explore() {
             const roll = Math.random();
             let resultMessage = '';
+            let startedBattle = false;
 
             if (roll < 0.3) { // 30% - Encontrar Dinheiro
                 const money = Math.floor(Math.random() * 200) + 100;
@@ -475,22 +647,29 @@
                 item.quantity++;
                 resultMessage = `Você encontrou 1x ${item.name}!`;
             } else if (roll < 0.75) { // 25% - Encontrar Pokémon Selvagem
+                addExploreLog('Um Pokémon selvagem apareceu!');
                 await startWildBattle();
-                return; // Já renderiza a tela de batalha
+                startedBattle = true;
             } else { // 25% - Nada ou Batalha NPC (simplificado para "Nada" por enquanto)
                 resultMessage = 'Você explorou, mas não encontrou nada de interessante.';
             }
 
-            saveGame();
-            renderExploreResult(resultMessage);
+            if (!startedBattle) {
+                addExploreLog(resultMessage);
+                saveGame();
+                renderMainMenu(document.getElementById('app-container')); // Força re-render do menu
+            }
         }
 
+        // Mantém a função antiga, mas não é mais usada pelo menu principal
         function renderExplore(app) {
+            // Este é o antigo explore screen, mantido para fins de compatibilidade mas não usado pelo menu principal
+            const lastLog = window.gameState.exploreLog.slice(-1)[0] || 'O que você quer fazer?';
             const content = `
                 <div class="text-xl font-bold text-center mb-4 text-gray-800 gba-font">EXPLORAÇÃO</div>
                 <p class="text-center mb-4 text-sm gba-font">Você está na grama alta...</p>
                 <div id="explore-result" class="h-32 p-2 mb-4 bg-white border-2 border-gray-400 rounded overflow-y-auto text-sm gba-font">
-                    O que você quer fazer?
+                    ${lastLog}
                 </div>
                 <button onclick="explore()" class="gba-button bg-green-500 hover:bg-green-600 w-full mb-2">Andar</button>
                 <button onclick="showScreen('mainMenu')" class="gba-button bg-gray-500 hover:bg-gray-600 w-full">Voltar</button>
@@ -498,19 +677,14 @@
             app.innerHTML = renderGbaCard(content);
         }
 
-        function renderExploreResult(message) {
-            const resultBox = document.getElementById('explore-result');
-            if (resultBox) {
-                resultBox.innerHTML = message;
-            }
-        }
 
         // --- Batalhas (PvE) ---
+
         async function startWildBattle() {
             const randomId = Math.floor(Math.random() * 151) + 1; // 1ª geração
             const wildPokemonData = await fetchPokemonData(randomId);
             if (!wildPokemonData) {
-                renderExploreResult('Erro ao encontrar Pokémon selvagem. Tente de novo.');
+                addExploreLog('Erro ao encontrar Pokémon selvagem.');
                 return;
             }
             // Define o nível do Pokémon selvagem perto do mais forte do jogador
@@ -590,13 +764,16 @@
 
                 optionsHtml = `<div class="grid grid-cols-2 gap-2">${optionsHtml}</div>`;
                 optionsHtml += `<button onclick="setBattleMenu('main')" class="gba-button bg-gray-500 hover:bg-gray-600 w-full mt-2">Voltar</button>`;
-            } else {
+            } else if (battle.currentMenu === 'disabled') { // NOVO ESTADO: Desativa botões durante animação
+                 optionsHtml = `<div class="p-2 text-center gba-font text-xs text-gray-700">Aguarde...</div>`;
+            } 
+            else {
                  optionsHtml = `
                     <div class="grid grid-cols-2 gap-2">
                         <button onclick="setBattleMenu('fight')" class="gba-button bg-red-500 hover:bg-red-600">Lutar</button>
                         <button onclick="playerTurn('run')" class="gba-button bg-green-500 hover:bg-green-600">Fugir</button>
                         <button onclick="setBattleMenu('item')" class="gba-button bg-yellow-500 hover:bg-yellow-600">Item</button>
-                        <button onclick="playerTurn('pokemon')" class="gba-button bg-blue-500 hover:bg-blue-600" disabled>Pokémon</button>
+                        <button onclick="showScreen('switchPokemon')" class="gba-button bg-blue-500 hover:bg-blue-600">Pokémon</button> <!-- ATIVADO -->
                     </div>
                 `;
             }
@@ -613,7 +790,7 @@
                                 <div class="h-2 rounded-full transition-all duration-500 ${opponentHpPercent > 50 ? 'bg-green-500' : opponentHpPercent > 20 ? 'bg-yellow-500' : 'bg-red-500'}" style="width: ${opponentHpPercent}%;"></div>
                             </div>
                         </div>
-                        <img src="${opponent.sprite}" alt="${opponent.name}" class="w-16 h-16 absolute -left-8 -top-8 transform scale-150">
+                        <img src="${opponent.sprite}" alt="${opponent.name}" class="opponent-sprite w-16 h-16 absolute -left-8 -top-8 transform scale-150">
                     </div>
 
                     <!-- Jogador -->
@@ -652,6 +829,88 @@
             window.gameState.battle.currentMenu = menu;
             updateBattleScreen();
         }
+        
+        // NOVO: Renderiza a tela de troca de Pokémon
+        function renderSwitchPokemon(app) {
+            if (!window.gameState.battle) return showScreen('mainMenu');
+
+            const activeIndex = window.gameState.battle.playerPokemonIndex;
+            
+            const pokemonHtml = window.gameState.profile.pokemon.map((p, index) => {
+                const isFainted = p.currentHp <= 0;
+                const isActive = index === activeIndex;
+                const canSelect = !isActive && !isFainted;
+
+                let buttonText = '';
+                let buttonClass = '';
+
+                if (isActive) {
+                    buttonText = 'ATIVO';
+                    buttonClass = 'bg-blue-300 cursor-not-allowed';
+                } else if (isFainted) {
+                    buttonText = 'DESMAIADO';
+                    buttonClass = 'bg-gray-400 cursor-not-allowed';
+                } else {
+                    buttonText = 'TROCAR';
+                    buttonClass = 'bg-green-500 hover:bg-green-600';
+                }
+
+                return `
+                    <div class="flex items-center justify-between p-2 border-b border-gray-300 ${isFainted ? 'opacity-70' : ''}">
+                        <div class="flex items-center">
+                            <img src="${p.sprite}" alt="${p.name}" class="w-10 h-10 mr-2">
+                            <div>
+                                <div class="font-bold gba-font">${p.name} (Nv. ${p.level})</div>
+                                <div class="text-xs gba-font">HP: ${p.currentHp}/${p.maxHp}</div>
+                            </div>
+                        </div>
+                        <button 
+                            onclick="${canSelect ? `switchPokemon(${index})` : ''}" 
+                            class="gba-button text-xs w-24 h-8 ${buttonClass}" 
+                            ${!canSelect ? 'disabled' : ''}>
+                            ${buttonText}
+                        </button>
+                    </div>
+                `;
+            }).join('');
+
+            const content = `
+                <div class="text-xl font-bold text-center mb-4 text-gray-800 gba-font">TROCAR POKÉMON</div>
+                <div class="h-64 overflow-y-auto border border-gray-400 p-2 mb-4 bg-white">${pokemonHtml}</div>
+                <button onclick="showScreen('battle')" class="gba-button bg-gray-500 hover:bg-gray-600 w-full">Voltar</button>
+            `;
+            app.innerHTML = renderGbaCard(content);
+        }
+
+        // NOVO: Lógica de troca de Pokémon
+        async function switchPokemon(newIndex) {
+            const battle = window.gameState.battle;
+            const currentPokemon = getActivePokemon();
+            const newPokemon = window.gameState.profile.pokemon[newIndex];
+            
+            if (newIndex === battle.playerPokemonIndex || newPokemon.currentHp <= 0) {
+                // Isso deve ser evitado pelos botões desativados, mas é uma segurança
+                return;
+            }
+
+            battle.playerPokemonIndex = newIndex;
+            
+            addBattleLog(`Volte, ${currentPokemon.name}! Vá, ${newPokemon.name}!`);
+            
+            // Se for PvP, a ação é enviada e o turno do oponente é gerenciado pelo listener
+            if (battle.type === 'pvp') {
+                // Simplificação: apenas envia a notificação de que o jogador trocou
+                await sendPvpAction('switch', null); 
+            } else {
+                // Se for PvE, o oponente ataca imediatamente
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                await playerTurn('opponent_attack');
+            }
+            
+            // Retorna à tela de batalha principal
+            showScreen('battle');
+        }
+
 
         // Simulação do turno do jogador
         async function playerTurn(action, moveName = null) {
@@ -659,18 +918,21 @@
             const playerPokemon = getActivePokemon();
             const opponent = battle.opponent;
             let ended = false;
+            
+            // CORREÇÃO: Busca o item pelo nome ANTES de verificar suas propriedades
+            const item = window.gameState.profile.items.find(i => i.name === moveName);
+
 
             if (battle.type === 'pvp') {
                 // Se PvP, envia a ação e espera o processamento do servidor
-                if (action === 'item') {
-                    const item = window.gameState.profile.items.find(i => i.name === moveName);
-                    if (item && item.catchRate) {
+                if (action === 'item' && item) {
+                    if (item.catchRate) {
                          // Pokébolas não são permitidas em PvP
                          addBattleLog("Pokébolas não podem ser usadas em batalhas PvP.");
                          setBattleMenu('main');
                          return;
                     }
-                    if (item && item.healAmount) {
+                    if (item.healAmount) {
                          // Cura imediata, mas sem ataque do oponente no mesmo turno
                          useItem(moveName); 
                          // Envia a ação 'used_item' para sincronização (simplificado)
@@ -693,12 +955,25 @@
                     addBattleLog(`Você falhou em fugir!`);
                 }
             } else if (action === 'move') {
+                if (playerPokemon.currentHp <= 0) {
+                    addBattleLog(`${playerPokemon.name} desmaiou e não pode atacar!`);
+                    // Não encerra a batalha aqui, mas força o jogador a trocar.
+                    setBattleMenu('main'); 
+                    return;
+                }
                 const damage = calculateDamage(playerPokemon, moveName, opponent);
                 opponent.currentHp = Math.max(0, opponent.currentHp - damage);
                 addBattleLog(`${playerPokemon.name} usou ${formatName(moveName)}! Causou ${damage} de dano.`);
-            } else if (action === 'item') {
+            } else if (action === 'item' && item) {
                 // Trata o uso de item (Pokébola/Poção) e retorna se for Poção, pois o item chama o turno do oponente
-                const isHealing = window.gameState.profile.items.find(i => i.name === moveName && i.healAmount);
+                const isHealing = item.healAmount;
+                
+                if (item.catchRate) {
+                    // Se for Pokébola, a função tryCapture é chamada abaixo e gerencia o turno do oponente.
+                    await tryCapture(moveName, item.catchRate);
+                    return;
+                }
+                
                 useItem(moveName); 
                 if (isHealing) {
                     setBattleMenu('main');
@@ -727,9 +1002,13 @@
                 addBattleLog(`${opponent.name} usou ${formatName(randomOpponentMove)}! Recebeu ${damage} de dano.`);
                 
                 if (playerPokemon.currentHp === 0) {
-                    addBattleLog(`${playerPokemon.name} desmaiou! Você perdeu a batalha!`);
-                    // Perda
-                    ended = true;
+                    addBattleLog(`${playerPokemon.name} desmaiou! Você precisa trocar de Pokémon.`);
+                    // Verifica se há Pokémons vivos
+                    const hasLivePokemon = window.gameState.profile.pokemon.some(p => p.currentHp > 0);
+                    if (!hasLivePokemon) {
+                        addBattleLog('Todos os seus Pokémons desmaiaram! Você perdeu a batalha.');
+                        ended = true;
+                    }
                 }
             }
 
@@ -787,16 +1066,9 @@
 
             // --- Lógica DENTRO de Batalha ---
             
-            item.quantity--;
-            
-            if (item.catchRate) {
-                // É uma Pokébola
-                const captured = tryCapture(itemName, item.catchRate);
-                if (captured) {
-                    return; // Batalha já foi encerrada na função tryCapture
-                }
-            } else if (item.healAmount) {
-                // É uma Poção (só pode ser usada no seu Pokémon ativo na batalha)
+            // Item de cura só é usado se não for pokébola, pois pokébola é tratada em playerTurn
+            if (item.healAmount) {
+                item.quantity--;
                 const playerPokemon = getActivePokemon();
                 
                 if (playerPokemon.currentHp >= playerPokemon.maxHp) {
@@ -810,12 +1082,6 @@
             }
             
             updateBattleScreen();
-            
-            // Depois de usar o item, o oponente ataca (apenas em PvE, se for Pokébola, o tryCapture já trata o fim da batalha)
-            if (window.gameState.battle.type !== 'pvp' && item.healAmount) {
-                // Passa o controle para o ataque do oponente com delay para dar tempo de ler o log de cura
-                setTimeout(() => playerTurn('opponent_attack'), 1000); 
-            }
             
             // Volta para o menu principal
             setBattleMenu('main');
@@ -839,6 +1105,7 @@
         }
 
         // --- PvP com Firebase Firestore ---
+        
         // Adiciona a verificação de configuração do Firebase
         function isPvpEnabled() {
             return db !== null && auth !== null;
@@ -1188,6 +1455,7 @@
         }
 
         // --- Funções de Inicialização e Auth ---
+
         async function initAuth() {
             // Se firebaseConfig existe (seja do ambiente real ou a dummy), tente inicializar
             if (firebaseConfig) { 
@@ -1266,6 +1534,7 @@
             document.getElementById(id).classList.add('hidden');
         }
 
+
         // Inicia o jogo no carregamento da janela
         window.onload = initAuth;
 
@@ -1283,11 +1552,13 @@
         window.copyPvpLink = copyPvpLink;
         window.showModal = showModal;
         window.hideModal = hideModal;
+        window.switchPokemon = switchPokemon; // NOVO
 
     </script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
         
+        /* Estilo inspirado no GBA */
         .gba-font {
             font-family: 'Press Start 2P', cursive;
             text-transform: uppercase;
@@ -1325,6 +1596,17 @@
             cursor: not-allowed;
         }
 
+        /* Animação de balanço da pokébola */
+        @keyframes shake {
+            0%, 100% { transform: scale(1.5) rotate(0deg); }
+            20%, 60% { transform: scale(1.5) rotate(-15deg); }
+            40%, 80% { transform: scale(1.5) rotate(15deg); }
+        }
+
+        .animate-spin-slow {
+            animation: shake 1.2s infinite ease-in-out;
+        }
+        /* Estilos específicos para o container principal */
         body {
             background-color: #2d3748; /* Fundo escuro */
             display: flex;
@@ -1336,8 +1618,9 @@
     </style>
 </head>
 <body>
-    <!-- O conteúdo será carregado dinamicamente via JavaScript -->
+    
     <div id="app-container" class="w-full max-w-lg">
+        <!-- O conteúdo será carregado dinamicamente via JavaScript -->
         <div class="p-4 w-full max-w-lg mx-auto">
              <div class="bg-gray-100 border-4 border-gray-800 rounded-lg shadow-2xl p-8 text-center gba-screen">
                 <div class="animate-pulse text-xl font-bold text-gray-800 gba-font">CARREGANDO...</div>
